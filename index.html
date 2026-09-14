@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VertexForge — vertex modeler</title>
+<link rel="stylesheet" href="./src/ui/style.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">▲</span>
+    <strong>VertexForge</strong>
+    <input id="docname" class="docname" value="Untitled" spellcheck="false" aria-label="Model name" />
+  </div>
+
+  <div class="tools" role="toolbar" aria-label="Modeling tools">
+    <button data-tool="select" title="Select (V)"><kbd>V</kbd> Select</button>
+    <button data-tool="vertex" title="Place vertex (B)"><kbd>B</kbd> Vertex</button>
+    <button data-tool="edge" title="Draw edge (E)"><kbd>E</kbd> Edge</button>
+    <button data-tool="face" title="Draw face (F)"><kbd>F</kbd> Face</button>
+    <button data-tool="move" title="Move vertex (M)"><kbd>M</kbd> Move</button>
+  </div>
+
+  <div class="actions">
+    <button data-op="undo" title="Undo (Ctrl+Z)">↶</button>
+    <button data-op="redo" title="Redo (Ctrl+Shift+Z)">↷</button>
+    <span class="sep"></span>
+    <button data-op="import">Import</button>
+    <button data-op="export-json" title="Save (Ctrl+S)">Save JSON</button>
+    <button data-op="export-glb" class="primary">Export GLB</button>
+    <button data-op="shot" title="Save a PNG of the viewport">📷</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div id="viewport"></div>
+
+    <div class="viewnav">
+      <button data-view="persp" title="Perspective (0)">3D</button>
+      <button data-view="front" title="Front (1)">Front</button>
+      <button data-view="right" title="Right (2)">Side</button>
+      <button data-view="top" title="Top (3)">Top</button>
+      <button data-view="back" title="Back (4)">Back</button>
+      <button data-view="left" title="Left (5)">Left</button>
+      <button data-view="bottom" title="Bottom (6)">Bot</button>
+      <span class="sep"></span>
+      <button data-op="frame" title="Frame model (Home)">⤢ Fit</button>
+    </div>
+
+    <div class="overlay hud">
+      <div class="stats">
+        <span><b id="stat-v">0</b> verts</span>
+        <span><b id="stat-e">0</b> edges</span>
+        <span><b id="stat-f">0</b> faces</span>
+        <span><b id="stat-t">0</b> tris</span>
+        <span id="stat-tight" class="badge dim">no faces</span>
+      </div>
+      <div class="sub"><span id="stat-sel">V 0 · E 0 · F 0</span> — <span id="readout">x — y — z —</span></div>
+      <ul id="problems" class="problems"></ul>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <div id="hint" class="hint"></div>
+  </section>
+
+  <aside class="panel">
+    <div class="group">
+      <h2>Seed</h2>
+      <div class="row">
+        <button data-op="cube">Cube</button>
+        <button data-op="plane">Grid</button>
+        <button data-op="tetra">Tetra</button>
+      </div>
+      <button data-op="clear" class="wide danger">New empty model</button>
+    </div>
+
+    <div class="group">
+      <h2>Build</h2>
+      <div class="row">
+        <button data-op="face-sel" title="Make a face from 3+ selected vertices">Face from verts</button>
+        <button data-op="fill" title="Fill a closed loop of selected edges">Fill loop</button>
+      </div>
+      <div class="row">
+        <button data-op="extrude" title="Push selected faces along their normal">Extrude</button>
+        <label class="inline">dist
+          <select id="dist">
+            <option value="0.1">0.1</option>
+            <option value="0.25" selected>0.25</option>
+            <option value="0.5">0.5</option>
+            <option value="1">1.0</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button data-op="weld" title="Merge coincident vertices">Weld</button>
+        <button data-op="snap" title="Snap selected vertices to the grid">Snap grid</button>
+        <label class="inline">snap
+          <select id="snap">
+            <option value="0" selected>off</option>
+            <option value="0.05">0.05</option>
+            <option value="0.125">0.125</option>
+            <option value="0.25">0.25</option>
+            <option value="0.5">0.5</option>
+            <option value="1">1.0</option>
+          </select>
+        </label>
+      </div>
+      <button data-op="delete" class="wide danger">Delete selection (Del)</button>
+    </div>
+
+    <div class="group">
+      <h2>Mesh</h2>
+      <div class="row">
+        <button data-op="unify" title="Make face orientations consistent">Unify winding</button>
+        <button data-op="flip" title="Reverse every face">Flip all</button>
+      </div>
+      <button data-op="center" class="wide">Center on origin</button>
+      <label class="check"><input type="checkbox" id="t-handles" checked /> Vertex handles <kbd>H</kbd></label>
+      <label class="check"><input type="checkbox" id="t-wire" checked /> Wireframe <kbd>W</kbd></label>
+      <label class="check"><input type="checkbox" id="t-shade" checked /> Shaded faces <kbd>X</kbd></label>
+    </div>
+
+    <div class="group" id="inspector" hidden>
+      <h2 id="vlabel">vertex</h2>
+      <div class="coords">
+        <label>X <input id="px" type="number" step="0.05" /></label>
+        <label>Y <input id="py" type="number" step="0.05" /></label>
+        <label>Z <input id="pz" type="number" step="0.05" /></label>
+      </div>
+      <button id="apply-coord" class="wide primary">Apply</button>
+    </div>
+
+    <div class="group help">
+      <h2>Tips</h2>
+      <p>Drag to orbit · wheel to zoom · right-drag to pan.</p>
+      <p>Arrow keys nudge the selected vertex along world X (←/→) and Y (↑/↓); hold Shift for a fine step. For depth moves or exact numbers, use the coordinate fields below.</p>
+      <p>Everything autosaves to this browser. Use <b>Save JSON</b> for a file you can share, <b>Export GLB</b> for Blender or a viewer.</p>
+    </div>
+  </aside>
+</main>
+
+<input type="file" id="file" accept=".json,application/json" hidden />
+<script type="module" src="./src/ui/app.js"></script>
+</body>
+</html>
