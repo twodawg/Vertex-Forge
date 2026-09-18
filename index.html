@@ -42,7 +42,7 @@
 </header>
 
 <main class="layout">
-  <section class="stage">
+  <section class="stage" id="stage">
     <div id="viewport"></div>
 
     <div class="viewnav">
@@ -149,7 +149,64 @@
   </aside>
 </main>
 
-<input type="file" id="file" accept=".json,application/json" hidden />
+<input type="file" id="file" accept=".json,.obj,.stl,.ply,.glb,.gltf" hidden />
+
+<!-- Import options: shown for external 3D formats, skipped for native JSON. -->
+<div id="importdlg" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="imp-title">
+    <h2 id="imp-title">Import <span id="imp-file" class="mono"></span></h2>
+    <p id="imp-preview" class="muted mono"></p>
+
+    <label class="check"><input type="radio" name="imp-mode" value="replace" checked /> Replace the current model</label>
+    <label class="check"><input type="radio" name="imp-mode" value="merge" /> Add to the current model</label>
+
+    <div class="grid2">
+      <label class="field">Up axis
+        <select id="imp-up">
+          <option value="y-up" selected>Y up (glTF, OBJ, PLY)</option>
+          <option value="z-up">Z up (STL, CAD)</option>
+        </select>
+      </label>
+      <label class="field">Scale
+        <select id="imp-scale">
+          <option value="1" selected>1 : 1</option>
+          <option value="0.001">mm → units</option>
+          <option value="0.01">cm → units</option>
+          <option value="100">m → units</option>
+        </select>
+      </label>
+      <label class="field">Weld radius
+        <select id="imp-weld">
+          <option value="auto" selected>Auto</option>
+          <option value="0">Off (keep duplicates)</option>
+          <option value="0.001">0.001</option>
+          <option value="0.01">0.01</option>
+          <option value="0.1">0.1</option>
+        </select>
+      </label>
+      <label class="field">Fit size
+        <select id="imp-fit">
+          <option value="0" selected>Keep as-is</option>
+          <option value="2">2 units</option>
+          <option value="4">4 units</option>
+          <option value="10">10 units</option>
+        </select>
+      </label>
+    </div>
+
+    <label class="check"><input type="checkbox" id="imp-merge" checked /> Merge flat triangles into polygons</label>
+    <label class="check"><input type="checkbox" id="imp-edges" /> Keep polygon outlines as edges</label>
+    <label class="check"><input type="checkbox" id="imp-handles" /> Show vertex handles</label>
+
+    <p id="imp-note" class="muted"></p>
+
+    <div class="modal-actions">
+      <button id="imp-cancel">Cancel</button>
+      <button id="imp-ok" class="primary">Import</button>
+    </div>
+  </div>
+</div>
+
 <script type="module" src="./src/ui/app.js"></script>
 </body>
 </html>

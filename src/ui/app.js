@@ -29,7 +29,8 @@ import {
   snapVerticesToGrid,
   orderRing,
 } from '../core/ops.js';
-import { download, exportJSON, readJSONFile, exportGLB, safeName } from './io.js';
+import { download, exportJSON, readJSONFile, exportGLB, safeName, importFile, stemOf, extOf } from './io.js';
+import { boundsOf } from '../core/geometry.js';
 
 const AUTOSAVE_KEY = 'vertexforge.autosave.v1';
 const q = (sel) => document.querySelector(sel);
@@ -445,6 +446,157 @@ async function doImport(file) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Import flow: pick -> options -> parse (off the click) -> apply
+ * ------------------------------------------------------------------ */
+
+const dlg = {
+  el: null,
+  pending: null,
+};
+
+const NATIVE_EXT = new Set(['json']);
+
+function beginImport(file) {
+  // Native documents need no options: they are already in our exact format.
+  if (NATIVE_EXT.has(extOf(file.name))) {
+    doImport(file);
+    return;
+  }
+  dlg.pending = file;
+  const isSTL = extOf(file.name) === 'stl';
+  q('#imp-file').textContent = file.name;
+  q('#imp-preview').textContent = `${(file.size / 1024).toFixed(0)} KB`;
+  q('#imp-note').textContent = 'STL and CAD files are usually Z-up; glTF, OBJ and PLY are Y-up.';
+  // STL and CAD exports are conventionally Z-up; everything else here is Y-up.
+  q('#imp-up').value = isSTL ? 'z-up' : 'y-up';
+  q('#imp-scale').value = '1';
+  q('#imp-merge').checked = true;
+  q('#imp-edges').checked = false;
+  q('#importdlg').hidden = false;
+  q('#imp-ok').focus();
+}
+
+function importOptions() {
+  const weldSel = q('#imp-weld').value;
+  return {
+    up: q('#imp-up').value,
+    scale: Number(q('#imp-scale').value) || 1,
+    fit: Number(q('#imp-fit').value) || null,
+    weld: weldSel === 'auto' ? true : Number(weldSel),
+    mergePolys: q('#imp-merge').checked,
+    keepEdges: q('#imp-edges').checked,
+    mode: qa('[name="imp-mode"]').find((r) => r.checked)?.value || 'replace',
+    showHandles: q('#imp-handles').checked,
+  };
+}
+
+function closeImportDialog() {
+  dlg.pending = null;
+  q('#importdlg').hidden = true;
+}
+
+q('#imp-ok').addEventListener('click', () => confirmImport());
+q('#imp-cancel').addEventListener('click', () => closeImportDialog());
+q('#importdlg').addEventListener('pointerdown', (ev) => {
+  if (ev.target === q('#importdlg')) closeImportDialog();
+});
+// Escape backs out of the dialog without also cancelling a chain / clearing the
+// selection underneath, so swallow the event before the app's key handler runs.
+window.addEventListener(
+  'keydown',
+  (ev) => {
+    if (q('#importdlg').hidden) return;
+    if (ev.key === 'Escape') {
+      ev.stopPropagation();
+      ev.preventDefault();
+      closeImportDialog();
+    } else if (ev.key === 'Enter' && ev.target.matches('button, select')) {
+      ev.stopPropagation();
+      confirmImport();
+    }
+  },
+  true,
+);
+
+async function confirmImport() {
+  const file = dlg.pending;
+  if (!file) return;
+  dlg.pending = null;
+  const opts = importOptions();
+  q('#importdlg').hidden = true;
+  q('#stage').classList.add('importing');
+  toast(`Importing ${file.name}…`, 'info');
+  // Let the toast paint before a parse that can take a second or two.
+  await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
+  try {
+    const { doc, stats } = await importFile(file, { ...opts, name: docNameFor(file) });
+    if (opts.mode === 'merge') {
+      state.hist.begin();
+      mergeIntoCurrent(doc);
+      if (!state.hist.commit(`import ${stats.vertices} verts`)) {
+        state.hist.touch();
+      }
+    } else {
+      state.doc = doc;
+      state.hist = createHistory(state.doc);
+    }
+    clearSelection();
+    cancelChain();
+
+    // Big meshes: handles and dense wire overlays make the editor unusable, so
+    // start with them off and let the user opt back in.
+    if (stats.large && !opts.showHandles) {
+      state.show.handles = false;
+      viewport.setOptions(state.show);
+      syncToggles();
+    }
+
+    sync(true);
+    const bits = [`${stats.vertices} verts`, `${stats.faces} faces`];
+    if (stats.edges) bits.push(`${stats.edges} edges`);
+    if (stats.merged) bits.push(`${stats.merged} welded`);
+    if (stats.polygonGroups) bits.push(`${stats.polygonGroups} polys rebuilt`);
+    toast(`${file.name}: ${bits.join(', ')}.`, 'ok');
+    if (stats.note) toast(`${stats.note}${stats.large ? ' Large mesh: vertex handles are off (press H).' : ''}`, 'info');
+    else if (stats.large) toast('Large mesh: vertex handles are off - press H to show them.', 'info');
+    else if (!opts.showHandles && state.show.handles) {
+      // no-op: handles stay on for small imports
+    }
+  } catch (err) {
+    toast(`Import failed: ${err.message}`, 'err');
+  } finally {
+    q('#stage').classList.remove('importing');
+  }
+}
+
+function docNameFor(file) {
+  return stemOf(file.name) || 'Imported';
+}
+
+/**
+ * Append an imported document's geometry into the live one. Offsets it clear of
+ * the origin so two models do not perfectly overlap, then welds nothing - the
+ * user can do that deliberately.
+ */
+function mergeIntoCurrent(incoming) {
+  const base = state.doc;
+  const m = new Map(); // incoming vertex id -> new id
+  const b = boundsOf(base.vertices);
+  const offset = b.radius > 0 ? b.radius * 2 + 1 : 2;
+  for (const v of incoming.vertices) {
+    const nv = addVertex(base, { x: v.x + offset, y: v.y, z: v.z });
+    m.set(v.id, nv.id);
+  }
+  for (const e of incoming.edges) {
+    if (m.has(e.a) && m.has(e.b)) addEdge(base, m.get(e.a), m.get(e.b));
+  }
+  for (const f of incoming.faces) {
+    if (f.loop.every((id) => m.has(id))) addFace(base, f.loop.map((id) => m.get(id)));
+  }
+}
+
 let autosaveTimer = 0;
 function scheduleAutosave() {
   clearTimeout(autosaveTimer);
@@ -477,7 +629,7 @@ function restoreAutosave() {
  * ------------------------------------------------------------------ */
 
 function readout(x, y, z) {
-  const r = (v) => (Number.isFinite(v) ? v.toFixed(3) : 'â€”');
+  const r = (v) => (Number.isFinite(v) ? v.toFixed(3) : '—');
   q('#readout').textContent = `x ${r(x)}  y ${r(y)}  z ${r(z)}`;
 }
 
@@ -489,7 +641,7 @@ function updateHUD() {
   q('#stat-e').textContent = m ? m.edgePairs.length : d.edges.length;
   q('#stat-f').textContent = d.faces.length;
   q('#stat-t').textContent = m ? m.triangleCount : 0;
-  q('#stat-sel').textContent = `V ${sel.verts.size} Â· E ${sel.edges.size} Â· F ${sel.faces.size}`;
+  q('#stat-sel').textContent = `V ${sel.verts.size} · E ${sel.edges.size} · F ${sel.faces.size}`;
 
   const tight = d.faces.length > 0 && isWatertight(d);
   const badge = q('#stat-tight');
@@ -543,11 +695,11 @@ function setTool(tool) {
 }
 
 const HINTS = {
-  select: 'Click to select Â· Shift-click adds Â· drag to orbit Â· wheel to zoom',
+  select: 'Click to select · Shift-click adds · drag to orbit · wheel to zoom',
   vertex: 'Click anywhere to drop a vertex on the surface under the cursor',
-  edge: 'Click vertices to chain edges Â· click the first one to close the loop',
-  face: 'Click vertices in order Â· Enter or click the first one to make the face',
-  move: 'Drag a vertex Â· arrow keys nudge Â· coordinates in the panel',
+  edge: 'Click vertices to chain edges · click the first one to close the loop',
+  face: 'Click vertices in order · Enter or click the first one to make the face',
+  move: 'Drag a vertex · arrow keys nudge · coordinates in the panel',
 };
 
 /* ------------------------------------------------------------------ *
@@ -635,7 +787,11 @@ qa('[data-op]').forEach((b) =>
   }),
 );
 
-q('#file').addEventListener('change', (ev) => doImport(ev.target.files[0]));
+q('#file').addEventListener('change', (ev) => {
+  const file = ev.target.files[0];
+  ev.target.value = ''; // allow re-picking the same file
+  if (file) beginImport(file);
+});
 
 q('#docname').addEventListener('input', (ev) => {
   state.doc.name = ev.target.value || 'Untitled';
@@ -768,5 +924,5 @@ const restored = restoreAutosave();
 if (!restored) makeCube(state.doc);
 q('#docname').value = state.doc.name || 'Untitled';
 sync(true);
-toast(restored ? 'Restored your last session.' : 'Cube seeded â€” press B to place vertices.', 'info');
+toast(restored ? 'Restored your last session.' : 'Cube seeded — press B to place vertices.', 'info');
 window.__vf = { state, viewport }; // debugging handle

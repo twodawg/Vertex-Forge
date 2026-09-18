@@ -1,9 +1,12 @@
 /**
- * File I/O: native JSON round-trip plus GLB export. No build step, so the
- * exporter comes from the vendored three.js examples via the import map.
+ * File I/O: native JSON round-trip, external 3D import, and GLB export.
+ * No build step, so the exporter comes from the vendored three.js examples via
+ * the import map.
  */
 import { serialize, deserialize } from '../core/model.js';
 import { buildMesh } from '../core/mesh.js';
+import { parseAny, extOf, ImportError } from '../core/formats.js';
+import { buildDocument } from '../core/importer.js';
 
 export function download(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -42,6 +45,82 @@ export async function readJSONFile(file) {
   }
   return deserialize(raw).doc;
 }
+
+/* ------------------------------------------------------------------ *
+ * Import
+ * ------------------------------------------------------------------ */
+
+/** Formats the file picker should offer. */
+export const IMPORT_ACCEPT = '.json,.vforge.json,.obj,.stl,.ply,.glb,.gltf';
+
+/** True for our own documents (native export, or a bare vertices/faces blob). */
+function looksLikeNativeJSON(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  if (raw.format === 'vertex-forge') return true;
+  // glTF JSON also parses as an object, so exclude it explicitly.
+  if (raw.asset || raw.meshes || raw.accessors || raw.buffers) return false;
+  return Array.isArray(raw.vertices) || Array.isArray(raw.faces) || Array.isArray(raw.edges);
+}
+
+/**
+ * Import any supported file into a document.
+ *
+ * @param {File} file
+ * @param {object} [opts] see core/importer.js buildDocument
+ * @returns {Promise<{doc:object, stats:object}>}
+ * @throws {ImportError} with a human-readable message for the toast
+ */
+export async function importFile(file, opts = {}) {
+  if (!file) throw new ImportError('No file was selected.');
+  const ext = extOf(file.name);
+
+  if (ext === 'json') {
+    const doc = await readJSONFile(file);
+    return {
+      doc,
+      stats: {
+        vertices: doc.vertices.length,
+        faces: doc.faces.length,
+        edges: doc.edges.length,
+        native: true,
+        note: '',
+      },
+    };
+  }
+
+  // A .json-less native doc is still possible (renamed export): sniff it.
+  const buffer = await file.arrayBuffer();
+  if (ext === '' || ext === 'txt') {
+    const head = new TextDecoder('utf-8').decode(new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 64)));
+    if (head.trimStart()[0] === '{') {
+      try {
+        const raw = JSON.parse(await new Blob([buffer]).text());
+        if (looksLikeNativeJSON(raw)) {
+          const doc = deserialize(raw).doc;
+          return { doc, stats: { vertices: doc.vertices.length, faces: doc.faces.length, native: true, note: '' } };
+        }
+      } catch {
+        /* not JSON after all - let the parser below report the real problem */
+      }
+    }
+  }
+
+  const parsed = parseAny(file.name, buffer);
+  const built = buildDocument(parsed, { ...opts, name: opts.name || stemOf(file.name) });
+
+  // Fail loudly rather than showing an empty viewport.
+  if (!built.doc.vertices.length) throw new ImportError('That file imported no vertices.');
+  return built;
+}
+
+/** Filename without extension, for the document name. */
+export function stemOf(name) {
+  return String(name || '')
+    .replace(/\.[a-z0-9]+$/i, '')
+    .trim();
+}
+
+export { ImportError, extOf };
 
 /**
  * GLB (binary glTF) via three's GLTFExporter.
