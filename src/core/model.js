@@ -132,13 +132,24 @@ export function removeEdge(doc, id) {
 /**
  * Add a face from an ordered ring of vertex ids. Duplicated and degenerate
  * rings are rejected so the renderer never has to cope with garbage.
+ *
+ * `color` is optional and stored only when it normalises to a hex string, so a
+ * document that never uses colour serialises exactly as it did before.
+ *
+ * `vmap` is an optional id->vertex map (or Set of ids) the caller already has.
+ * Building one internally is O(vertices), which turns a bulk import of F faces
+ * into O(F*V) - a real 17k-vertex sculpt spent 50 seconds here. Interactive
+ * edits add one face to a small document and pass nothing, so the default
+ * stays correct for them.
  */
-export function addFace(doc, loop) {
+export function addFace(doc, loop, color, vmap = null) {
   if (!Array.isArray(loop) || loop.length < 3) return null;
   if (new Set(loop).size !== loop.length) return null;
-  const m = vertexMap(doc);
+  const m = vmap || vertexMap(doc);
   if (loop.some((id) => !m.has(id))) return null;
   const f = { id: newId('f'), loop: [...loop] };
+  const c = normalizeColor(color);
+  if (c) f.color = c;
   doc.faces.push(f);
   return f;
 }
@@ -147,6 +158,113 @@ export function removeFace(doc, id) {
   const before = doc.faces.length;
   doc.faces = doc.faces.filter((f) => f.id !== id);
   return doc.faces.length !== before;
+}
+
+export function getFace(doc, id) {
+  return doc.faces.find((f) => f.id === id) || null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Face colour
+ * ------------------------------------------------------------------ */
+
+/** Neutral shade used for uncoloured faces; matches the viewport's old look. */
+export const DEFAULT_FACE_COLOR = '#c9d2e3';
+
+const HEX6 = /^#?([0-9a-f]{6})$/i;
+const HEX3 = /^#?([0-9a-f]{3})$/i;
+const FUNC = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i;
+
+/**
+ * Coerce anything colour-ish to `#rrggbb`, or null when there is no colour.
+ * Accepts `#rgb`, `#rrggbb`, `rgb(r,g,b)` / `rgba(...)` with 0-255 or 0-1
+ * channels, and a plain [r,g,b] triplet in 0-1 (what the importers hand back).
+ */
+export function normalizeColor(value) {
+  if (value == null || value === '') return null;
+
+  // Arrays come from the importers (0-1 floats) and from hand-written JSON
+  // (0-255). Pick the scale ONCE from the largest component: deciding per
+  // channel would read a legitimate 0-1 green and a stray 2 as different
+  // universes and produce a colour nobody asked for.
+  if (Array.isArray(value)) {
+    if (value.length < 3) return null;
+    const nums = value.slice(0, 3).map((v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    });
+    const to255 = Math.max(...nums.map(Math.abs)) > 1;
+    const chan = (n) => Math.max(0, Math.min(255, Math.round(to255 ? n : n * 255)));
+    return rgbHex(chan(nums[0]), chan(nums[1]), chan(nums[2]));
+  }
+
+  // Only strings beyond this point. Never coerce an arbitrary object through
+  // String(), or `{ toString: () => '#000000' }` becomes a "valid" colour.
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  let m = HEX6.exec(s);
+  if (m) return `#${m[1].toLowerCase()}`;
+  m = HEX3.exec(s);
+  if (m) {
+    const h = m[1];
+    return `#${h[0]}${h[0]}${h[1]}${h[1]}${h[2]}${h[2]}`.toLowerCase();
+  }
+  m = FUNC.exec(s);
+  if (m) {
+    // CSS rgb()/rgba() means 0-255 integers, or percentages. Sub-1 floats are
+    // not valid CSS here, so unlike arrays this path never guesses a scale.
+    const pct = /%/.test(s);
+    const parts = [m[1], m[2], m[3]].map((v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return 0;
+      const scaled = pct ? (n / 100) * 255 : n;
+      return Math.max(0, Math.min(255, Math.round(scaled)));
+    });
+    return rgbHex(parts[0], parts[1], parts[2]);
+  }
+  return null;
+}
+
+function rgbHex(r, g, b) {
+  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+}
+
+/**
+ * Set or clear a face's colour. Passing null/''/undefined clears it, which is
+ * what makes "uncolour" undoable rather than a magic grey.
+ */
+export function setFaceColor(doc, id, color) {
+  const f = getFace(doc, id);
+  if (!f) return false;
+  const c = normalizeColor(color);
+  if (c) f.color = c;
+  else delete f.color;
+  return true;
+}
+
+/** Paint every listed face; returns how many actually changed. */
+export function setFaceColors(doc, ids, color) {
+  const c = normalizeColor(color);
+  let n = 0;
+  for (const id of ids) {
+    const f = getFace(doc, id);
+    if (!f) continue;
+    if (c) {
+      if (f.color !== c) {
+        f.color = c;
+        n++;
+      }
+    } else if (f.color) {
+      delete f.color;
+      n++;
+    }
+  }
+  return n;
+}
+
+/** Faces whose ring contains any of these vertices - used by vertex ops. */
+export function facesUsingVertex(doc, id) {
+  return doc.faces.filter((f) => f.loop.includes(id));
 }
 
 export function setVertexPosition(doc, id, x, y, z) {
@@ -287,6 +405,23 @@ export function flipAllFaces(doc) {
   return doc.faces.length;
 }
 
+/**
+ * Reverse the listed faces only - this is how you "set" a face normal in
+ * VertexForge, because the normal is *derived* from the ring winding rather
+ * than stored. Flipping reverses both the Newell normal and the shading, so
+ * there is no separate normal to desync. Returns how many faces changed.
+ */
+export function flipFaces(doc, ids) {
+  const wanted = ids instanceof Set ? ids : new Set(ids);
+  let n = 0;
+  for (const f of doc.faces) {
+    if (!wanted.has(f.id)) continue;
+    f.loop.reverse();
+    n++;
+  }
+  return n;
+}
+
 /* ------------------------------------------------------------------ *
  * Diagnostics
  * ------------------------------------------------------------------ */
@@ -359,7 +494,9 @@ export function serialize(doc) {
       z: round(v.z, 6),
     })),
     edges: doc.edges.map((e) => ({ id: e.id, a: e.a, b: e.b })),
-    faces: doc.faces.map((f) => ({ id: f.id, loop: [...f.loop] })),
+    // `color` is emitted only when present, so colourless documents keep
+    // byte-identical output to earlier versions.
+    faces: doc.faces.map((f) => (f.color ? { id: f.id, loop: [...f.loop], color: f.color } : { id: f.id, loop: [...f.loop] })),
     stats: {
       vertices: doc.vertices.length,
       edges: doc.edges.length,
@@ -404,7 +541,12 @@ export function deserialize(raw) {
     .map((e) => ({ id: e.id || newId('e'), a: e.a, b: e.b }))
     .filter((e) => ids.has(e.a) && ids.has(e.b) && e.a !== e.b);
   doc.faces = (raw.faces || [])
-    .map((f) => ({ id: f.id || newId('f'), loop: (f.loop || []).filter((x) => ids.has(x)) }))
+    .map((f) => {
+      const face = { id: f.id || newId('f'), loop: (f.loop || []).filter((x) => ids.has(x)) };
+      const c = normalizeColor(f.color);
+      if (c) face.color = c;
+      return face;
+    })
     .filter((f) => f.loop.length >= 3 && new Set(f.loop).size === f.loop.length);
   doc.units = raw.units || 'unit';
   return { doc, foreign: false };

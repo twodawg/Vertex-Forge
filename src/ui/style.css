@@ -128,6 +128,30 @@ button.wide { width: 100%; margin-top: 6px; }
 .row button { flex: 1; }
 
 .inline { display: flex; align-items: center; gap: 4px; color: var(--fg-dim); font-size: 11px; }
+
+/* ---------- face colour ---------- */
+input[type="color"] {
+  width: 34px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+.hexreadout { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+.palette { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; }
+.swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid #ffffff22;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.swatch:hover { border-color: var(--accent); }
+.swatch.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.hintline { color: var(--fg-dim); font-size: 11px; margin: 6px 0 0; }
 select, input[type="number"] {
   background: var(--bg-3);
   border: 1px solid var(--line);

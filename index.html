@@ -28,6 +28,7 @@
     <button data-tool="edge" title="Draw edge (E)"><kbd>E</kbd> Edge</button>
     <button data-tool="face" title="Draw face (F)"><kbd>F</kbd> Face</button>
     <button data-tool="move" title="Move vertex (M)"><kbd>M</kbd> Move</button>
+    <button data-tool="paint" title="Paint the face under the cursor (P)"><kbd>P</kbd> Paint</button>
   </div>
 
   <div class="actions">
@@ -122,12 +123,30 @@
       <h2>Mesh</h2>
       <div class="row">
         <button data-op="unify" title="Make face orientations consistent">Unify winding</button>
+        <button data-op="flip-sel" title="Reverse the selected faces' normals">Flip selected</button>
         <button data-op="flip" title="Reverse every face">Flip all</button>
       </div>
       <button data-op="center" class="wide">Center on origin</button>
       <label class="check"><input type="checkbox" id="t-handles" checked /> Vertex handles <kbd>H</kbd></label>
       <label class="check"><input type="checkbox" id="t-wire" checked /> Wireframe <kbd>W</kbd></label>
       <label class="check"><input type="checkbox" id="t-shade" checked /> Shaded faces <kbd>X</kbd></label>
+      <label class="check"><input type="checkbox" id="t-normals" /> Face normals <kbd>N</kbd></label>
+    </div>
+
+    <div class="group">
+      <h2>Color</h2>
+      <div class="row">
+        <label class="inline">brush
+          <input type="color" id="brush" value="#e05a4e" />
+        </label>
+        <span id="brushhex" class="hexreadout">#e05a4e</span>
+      </div>
+      <div id="palette" class="palette" role="listbox" aria-label="Colour presets"></div>
+      <div class="row">
+        <button data-op="paint-sel" title="Fill every selected face with the brush colour">Paint selected</button>
+        <button data-op="paint-clear" title="Return selected faces to the default shade">Clear</button>
+      </div>
+      <p class="hintline">Paint tool: click a face to fill it, shift-click to paint a run. Faces keep colour through undo, JSON and GLB.</p>
     </div>
 
     <div class="group" id="inspector" hidden>

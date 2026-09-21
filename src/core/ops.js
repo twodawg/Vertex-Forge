@@ -123,7 +123,7 @@ export function extrudeFaces(doc, faceIds, distance = 0.25, direction = null) {
       const b = L[(i + 1) % L.length];
       const k = edgeKey(a, b);
       if (!counts.has(k)) counts.set(k, []);
-      counts.get(k).push({ a, b });
+      counts.get(k).push({ a, b, color: f.color });
     }
   }
   const boundary = [];
@@ -146,11 +146,13 @@ export function extrudeFaces(doc, faceIds, distance = 0.25, direction = null) {
   };
 
   // 1. Side walls, built BEFORE the caps move so we read old positions.
+  // Walls inherit the colour of the cap they came from, so painting a face and
+  // extruding it keeps the volume reading as one painted part.
   const walls = [];
-  for (const { a, b } of boundary) {
+  for (const { a, b, color } of boundary) {
     const na = makeNew(a);
     const nb = makeNew(b);
-    const f = addFace(doc, [a, b, nb, na]);
+    const f = addFace(doc, [a, b, nb, na], color);
     if (f) walls.push(f);
   }
 

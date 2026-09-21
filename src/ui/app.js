@@ -14,10 +14,15 @@ import {
   removeFace,
   addEdge,
   addFace,
+  getFace,
+  setFaceColors,
+  normalizeColor,
+  DEFAULT_FACE_COLOR,
   validate,
   centerOnOrigin,
   unifyWinding,
   flipAllFaces,
+  flipFaces,
 } from '../core/model.js';
 import { buildMesh, isWatertight } from '../core/mesh.js';
 import { makeCube, makePlane, makeTetra } from '../core/primitives.js';
@@ -46,9 +51,10 @@ const state = {
   view: { verts: new Set(), edges: new Set(), faces: new Set(), pending: new Set(), hoverVertex: null },
   pending: [], // staged vertex ids for the edge / face chains
   snap: 0,
-  show: { handles: true, wire: true, shade: true },
+  show: { handles: true, wire: true, shade: true, normals: false },
   drag: null,
   extrudeDistance: 0.25,
+  brush: '#e05a4e', // current face colour for the paint tool
 };
 
 const viewport = new Viewport(q('#viewport'));
@@ -246,6 +252,103 @@ function onClick(ev) {
       }
       break;
     }
+    case 'paint': {
+      if (hit.type === 'face' && hit.faceId && getFace(state.doc, hit.faceId)) {
+        // A plain click paints just the face under the cursor and selects it,
+        // so the panel shows what you just did. Shift-click keeps the
+        // selection growing, which is how you build up a run to fill in one
+        // undo step with "Paint selected".
+        if (!additive) clearSelection();
+        state.view.faces.add(hit.faceId);
+        paintFaces([hit.faceId], state.brush, 'paint face');
+      } else if (!additive) {
+        clearSelection();
+      }
+      afterSelectionChange();
+      break;
+    }
+  }
+}
+
+/**
+ * Colour a set of faces as one undoable step. `null`/'' clears back to the
+ * default shade rather than writing a magic grey, so an "uncoloured" face stays
+ * absent from the JSON entirely. `mutate` re-syncs the viewport when something
+ * actually changed, so there is no second sync here.
+ */
+function paintFaces(ids, color, label = 'paint faces') {
+  const wanted = ids.filter((id) => getFace(state.doc, id));
+  if (!wanted.length) return 0;
+  return mutate(label, () => setFaceColors(state.doc, wanted, color)) ?? 0;
+}
+
+function selectedFaceIds() {
+  return [...state.view.faces];
+}
+
+function opPaintSelection() {
+  const ids = selectedFaceIds();
+  if (!ids.length) {
+    toast('Select one or more faces to paint.', 'warn');
+    return;
+  }
+  const n = paintFaces(ids, state.brush, 'paint selection');
+  toast(n ? `Painted ${n} face${n === 1 ? '' : 's'} ${state.brush}.` : 'Already that colour.', n ? 'ok' : 'info');
+}
+
+function opPaintClear() {
+  const ids = selectedFaceIds();
+  if (!ids.length) {
+    toast('Select faces to clear.', 'warn');
+    return;
+  }
+  const n = paintFaces(ids, null, 'clear face colour');
+  toast(n ? `Cleared colour on ${n} face${n === 1 ? '' : 's'}.` : 'Those faces were uncoloured.', 'info');
+}
+
+/**
+ * Reverse the selected faces' winding - i.e. set their normals. Face normals in
+ * VertexForge are derived from ring order, so flipping the ring is the only
+ * honest way to change a normal (and it keeps shading in agreement).
+ */
+function opFlipSelected() {
+  const ids = selectedFaceIds();
+  if (!ids.length) {
+    toast('Select faces to flip.', 'warn');
+    return;
+  }
+  const n = mutate('flip faces', () => flipFaces(state.doc, ids));
+  toast(n ? `Reversed ${n} face${n === 1 ? '' : 's'} (normals flipped).` : 'Nothing to flip.', n ? 'ok' : 'info');
+}
+
+/* Palette: the brush colour plus a spread of presets, built once at boot. */
+const PALETTE_COLORS = [
+  '#e05a4e', '#ef8354', '#f2c14e', '#8fce5a', '#4fb3a1',
+  '#4d9be6', '#7a6ff0', '#c56ad6', '#e88ab0', '#dfe4ec',
+  '#a8b2c2', '#6b7688', '#3f4756', '#2a2f3a', DEFAULT_FACE_COLOR,
+];
+
+function setBrush(hex, fromInput) {
+  const c = normalizeColor(hex) || DEFAULT_FACE_COLOR;
+  state.brush = c;
+  if (!fromInput) q('#brush').value = c;
+  q('#brushhex').textContent = c;
+  qa('#palette .swatch').forEach((b) => b.classList.toggle('active', b.dataset.hex === c));
+}
+
+function buildPalette() {
+  const box = q('#palette');
+  box.innerHTML = '';
+  for (const hex of PALETTE_COLORS) {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.type = 'button';
+    b.dataset.hex = hex;
+    b.style.background = hex;
+    b.title = `Brush ${hex}`;
+    b.setAttribute('aria-label', `Set brush colour ${hex}`);
+    b.addEventListener('click', () => setBrush(hex));
+    box.appendChild(b);
   }
 }
 
@@ -700,6 +803,7 @@ const HINTS = {
   edge: 'Click vertices to chain edges · click the first one to close the loop',
   face: 'Click vertices in order · Enter or click the first one to make the face',
   move: 'Drag a vertex · arrow keys nudge · coordinates in the panel',
+  paint: 'Click a face to fill it with the brush colour · shift-click to build a multi-face selection',
 };
 
 /* ------------------------------------------------------------------ *
@@ -753,6 +857,7 @@ qa('[data-op]').forEach((b) =>
     else if (op === 'snap') opSnapGrid();
     else if (op === 'unify') opUnify();
     else if (op === 'flip') mutate('flip faces', () => flipAllFaces(state.doc));
+    else if (op === 'flip-sel') opFlipSelected();
     else if (op === 'center') opCenter();
     else if (op === 'frame') viewport.frame(state.mesh.bounds.center, state.mesh.bounds.radius);
     else if (op === 'undo') {
@@ -776,6 +881,8 @@ qa('[data-op]').forEach((b) =>
     else if (op === 'export-json') doExportJSON();
     else if (op === 'export-glb') doExportGLB();
     else if (op === 'import') q('#file').click();
+    else if (op === 'paint-sel') opPaintSelection();
+    else if (op === 'paint-clear') opPaintClear();
     else if (op === 'shot') {
       const url = viewport.screenshot();
       const a = document.createElement('a');
@@ -806,6 +913,8 @@ q('#dist').addEventListener('change', (ev) => {
   state.extrudeDistance = Math.abs(Number(ev.target.value) || 0.25);
 });
 
+q('#brush').addEventListener('input', (ev) => setBrush(ev.target.value, true));
+
 for (const id of ['#px', '#py', '#pz']) {
   const el = q(id);
   el.addEventListener('focus', () => (q('#inspector').dataset.editing = '1'));
@@ -834,7 +943,7 @@ q('#apply-coord').addEventListener('click', () => {
 qa('[data-view]').forEach((b) => b.addEventListener('click', () => viewport.setCameraPreset(b.dataset.view)));
 
 /* Display toggles: the checkboxes and the H/W/X keys drive the same state. */
-for (const [id, key] of [['#t-handles', 'handles'], ['#t-wire', 'wire'], ['#t-shade', 'shade']]) {
+for (const [id, key] of [['#t-handles', 'handles'], ['#t-wire', 'wire'], ['#t-shade', 'shade'], ['#t-normals', 'normals']]) {
   q(id).addEventListener('change', (ev) => {
     state.show[key] = ev.target.checked;
     viewport.setOptions(state.show);
@@ -845,6 +954,7 @@ function syncToggles() {
   q('#t-handles').checked = state.show.handles;
   q('#t-wire').checked = state.show.wire;
   q('#t-shade').checked = state.show.shade;
+  q('#t-normals').checked = state.show.normals;
 }
 
 window.addEventListener('keydown', (ev) => {
@@ -868,6 +978,7 @@ window.addEventListener('keydown', (ev) => {
   else if (k === 'e') setTool('edge');
   else if (k === 'f') setTool('face');
   else if (k === 'm') setTool('move');
+  else if (k === 'p') setTool('paint');
   else if (k === 'enter') commitChain();
   else if (k === 'escape') {
     cancelChain();
@@ -891,6 +1002,16 @@ window.addEventListener('keydown', (ev) => {
     viewport.setOptions(state.show);
     syncToggles();
     toast(state.show.shade ? 'Shaded' : 'Wire only', 'info');
+  } else if (k === 'n') {
+    state.show.normals = !state.show.normals;
+    viewport.setOptions(state.show);
+    syncToggles();
+    toast(
+      state.show.normals
+        ? 'Face normals: green = outward, red = inward. Flip / Unify winding set them.'
+        : 'Face normals off',
+      'info',
+    );
   } else if (k === 'home') viewport.frame(state.mesh.bounds.center, state.mesh.bounds.radius);
   else if (['1', '2', '3', '4', '5', '6', '0'].includes(k)) {
     const map = { 0: 'persp', 1: 'front', 2: 'right', 3: 'top', 4: 'back', 5: 'left', 6: 'bottom' };
@@ -920,6 +1041,8 @@ function nudge(ev) {
  * ------------------------------------------------------------------ */
 
 setTool('select');
+buildPalette();
+setBrush(state.brush);
 const restored = restoreAutosave();
 if (!restored) makeCube(state.doc);
 q('#docname').value = state.doc.name || 'Untitled';

@@ -5,6 +5,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { newellNormal } from '../core/geometry.js';
 
 const HANDLE_PX = 9; // on-screen diameter of a vertex handle
 const HIT_PX = 11; // pick radius around a handle
@@ -56,14 +57,17 @@ export class Viewport {
 
     /* ---- solid mesh ---- */
     this.solidGeo = new THREE.BufferGeometry();
-    this.solidMat = new THREE.MeshStandardMaterial({
+    // One shared material for uncoloured documents; setMaterials() swaps in an
+    // array of per-colour materials when the document actually uses any.
+    this.baseMat = new THREE.MeshStandardMaterial({
       color: 0xc9d2e3,
       roughness: 0.42,
       metalness: 0.05,
       flatShading: true,
       side: THREE.DoubleSide,
     });
-    this.solid = new THREE.Mesh(this.solidGeo, this.solidMat);
+    this.solidMats = [this.baseMat];
+    this.solid = new THREE.Mesh(this.solidGeo, this.solidMats);
     this.solid.frustumCulled = false;
     this.scene.add(this.solid);
 
@@ -105,6 +109,23 @@ export class Viewport {
     this.chain.visible = false;
     this.scene.add(this.chain);
 
+    /* ---- face-normal overlay: one segment per face, from centroid along the
+       winding-derived Newell normal. Outward-ish green, inward red - a quick
+       visual proxy for "is this face pointing the wrong way". ---- */
+    this.normalGeo = new THREE.BufferGeometry();
+    this.normalMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      depthTest: false,
+      transparent: true,
+      opacity: 0.95,
+      toneMapped: false,
+    });
+    this.normals = new THREE.LineSegments(this.normalGeo, this.normalMat);
+    this.normals.frustumCulled = false;
+    this.normals.renderOrder = 5;
+    this.normals.visible = false;
+    this.scene.add(this.normals);
+
     /* ---- vertex handles: one InstancedMesh keeps 10k handles cheap ---- */
     this.handleGeo = new THREE.SphereGeometry(1, 14, 10);
     this.handleMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
@@ -123,7 +144,7 @@ export class Viewport {
     this.mesh = null; // latest buildMesh() result
     this.doc = null;
     this.view = { verts: new Set(), edges: new Set(), faces: new Set() };
-    this.opts = { handles: true, wire: true, shade: true };
+    this.opts = { handles: true, wire: true, shade: true, normals: false };
 
     this._ro = new ResizeObserver(() => this.resize());
     this._ro.observe(container);
@@ -202,6 +223,11 @@ export class Viewport {
 
     this.solidGeo.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
     this.solidGeo.setIndex(mesh.indices);
+    this.solidGeo.clearGroups();
+    if (mesh.groups) {
+      for (const g of mesh.groups) this.solidGeo.addGroup(g.start, g.count, g.materialIndex);
+    }
+    this._applyMaterials(mesh.colors);
     this.solidGeo.computeBoundingSphere();
     this.solidGeo.computeVertexNormals();
     this.solid.visible = this.opts.shade && mesh.indices.length > 0;
@@ -213,7 +239,38 @@ export class Viewport {
     this._rebuildWire();
     this._rebuildChain();
     this._rebuildHighlight();
+    this._rebuildNormals();
     this._layoutHandles();
+  }
+
+  /**
+   * Keep one MeshStandardMaterial per distinct face colour, reused between
+   * syncs so editing a model does not thrash shader programs every frame.
+   * Index N corresponds to mesh.colors[N], which is what the geometry groups
+   * reference as `materialIndex`.
+   */
+  _applyMaterials(colors) {
+    const list = colors?.length ? colors : ['#c9d2e3'];
+    const mats = this.solidMats;
+
+    // Drop extras first, so a shrunk palette never leaves a stale material
+    // referenced by an index we are about to hand to three.js.
+    while (mats.length > list.length) {
+      const m = mats.pop();
+      if (m !== this.baseMat) m.dispose();
+    }
+    for (let i = 0; i < list.length; i++) {
+      if (!mats[i]) mats[i] = this.baseMat.clone();
+      const mat = mats[i];
+      if (mat.userData.hex !== list[i]) {
+        mat.color.set(list[i]);
+        mat.userData.hex = list[i];
+      }
+    }
+    // A Mesh with an ARRAY material renders only what geometry.groups covers -
+    // with no groups, three.js silently draws nothing. Uncoloured documents
+    // have groups:null, so hand them the single material instead.
+    this.solid.material = mats.length === 1 ? mats[0] : mats;
   }
 
   /** Replace the selection/hover/pending state and refresh the overlays. */
@@ -251,6 +308,7 @@ export class Viewport {
     if (this.doc && this.mesh) {
       this.solid.visible = this.opts.shade && this.mesh.indices.length > 0;
       this._rebuildHighlight();
+      this._rebuildNormals();
     }
   }
 
@@ -289,6 +347,71 @@ export class Viewport {
     this.hiGeo.setAttribute('position', this.solidGeo.getAttribute('position'));
     this.hiGeo.setIndex(tris);
     this.highlight.visible = tris.length > 0;
+  }
+
+  /**
+   * One line per face: centroid to centroid+normal. The normal is the Newell
+   * normal of the face ring - the same derivation the shading uses - so what
+   * you see is exactly what the renderer thinks the face points at. Green when
+   * the normal points away from the model centre, red when it points inward,
+   * which makes inverted or inconsistent winding obvious at a glance.
+   *
+   * "Setting a normal" in this app means changing the ring winding, so the
+   * Flip / Unify winding ops are the editor; this is the feedback layer.
+   */
+  _rebuildNormals() {
+    if (!this.opts.normals || !this.doc || !this.mesh || !this.doc.faces.length) {
+      this.normals.visible = false;
+      return;
+    }
+    const pos = this.mesh.positions;
+    const vi = this.mesh.vertexIndex;
+    const c = this.mesh.bounds.center;
+    const len = Math.max(this.mesh.bounds.radius * 0.28, 1e-4);
+
+    const verts = [];
+    const cols = [];
+    const out = new THREE.Color(0x4fd07a);
+    const inw = new THREE.Color(0xff5a5a);
+
+    for (const f of this.doc.faces) {
+      const pts = [];
+      for (const id of f.loop) {
+        const i = vi.get(id);
+        if (i === undefined) continue;
+        pts.push([pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]]);
+      }
+      if (pts.length < 3) continue;
+      const n = newellNormal(pts);
+      const mag = Math.hypot(n[0], n[1], n[2]);
+      if (mag < 1e-12) continue; // degenerate ring: no meaningful normal
+      const ux = n[0] / mag;
+      const uy = n[1] / mag;
+      const uz = n[2] / mag;
+
+      let cx = 0;
+      let cy = 0;
+      let cz = 0;
+      for (const p of pts) {
+        cx += p[0];
+        cy += p[1];
+        cz += p[2];
+      }
+      cx /= pts.length;
+      cy /= pts.length;
+      cz /= pts.length;
+
+      // Outward if the normal agrees with "away from the model centre".
+      const outward = ux * (cx - c[0]) + uy * (cy - c[1]) + uz * (cz - c[2]) >= 0;
+      const col = outward ? out : inw;
+
+      verts.push(cx, cy, cz, cx + ux * len, cy + uy * len, cz + uz * len);
+      cols.push(col.r, col.g, col.b, col.r, col.g, col.b);
+    }
+
+    this.normalGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    this.normalGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(cols), 3));
+    this.normals.visible = verts.length > 0;
   }
 
   /* ------------------------------------------------------------------ *
@@ -439,16 +562,34 @@ export class Viewport {
     return true;
   }
 
-  /** Snapshot of the shaded mesh for GLB export (no scene pollution kept). */
+  /**
+   * Snapshot of the shaded mesh for GLB export (no scene pollution kept).
+   * Reuses the live geometry's colour groups, so painted faces export as
+   * per-primitive materials rather than one flat grey.
+   */
   buildExportMesh() {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(this.mesh.positions), 3));
     g.setIndex([...this.mesh.indices]);
     g.computeVertexNormals();
-    const m = new THREE.MeshStandardMaterial({ color: 0xc9d2e3, roughness: 0.5, metalness: 0 });
-    const mesh = new THREE.Mesh(g, m);
-    mesh.name = this.doc?.name || 'VertexForgeModel';
     g.computeBoundingSphere();
+
+    const colors = this.mesh.colors?.length ? this.mesh.colors : ['#c9d2e3'];
+    const mats = colors.map(
+      (hex) => new THREE.MeshStandardMaterial({ color: new THREE.Color(hex), roughness: 0.5, metalness: 0, name: `face-${hex.slice(1)}` }),
+    );
+
+    let mesh;
+    if (this.mesh.groups) {
+      // One primitive per material keeps the exporter's output simple: glTF has
+      // no per-triangle colour, so groups become grouped primitives.
+      for (const grp of this.mesh.groups) g.addGroup(grp.start, grp.count, grp.materialIndex);
+      mesh = new THREE.Mesh(g, mats);
+    } else {
+      mesh = new THREE.Mesh(g, mats[0]);
+    }
+    mesh.name = this.doc?.name || 'VertexForgeModel';
+    mesh.userData.disposeMaterials = () => mats.forEach((m) => m.dispose());
     return mesh;
   }
 

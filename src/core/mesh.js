@@ -3,7 +3,7 @@
  * so it can be unit-tested and reused by exporters.
  */
 import { triangulate, boundsOf } from './geometry.js';
-import { vertexMap, allEdgePairs } from './model.js';
+import { vertexMap, allEdgePairs, DEFAULT_FACE_COLOR } from './model.js';
 
 /**
  * Triangulate every face into one shared vertex pool.
@@ -12,9 +12,17 @@ import { vertexMap, allEdgePairs } from './model.js';
  * index its 3D handle uses - the renderer can therefore map a picked triangle
  * straight back to the model.
  *
+ * Colour is a *face* property, and faces share vertices, so per-vertex colour
+ * attributes cannot express it (a corner between a red and a blue face would
+ * have to be both). Instead each face's colour becomes a material and the
+ * triangles are cut into contiguous `groups` that share one - see `colors` and
+ * `groups` below. The index order itself is never rearranged.
+ *
  * @param {object} doc
  * @returns {{positions: Float32Array, indices: number[], vertexIndex: Map<string,number>,
- *            faceTriangles: Map<string,number[][]>, triangleCount: number}}
+ *            faceTriangles: Map<string,number[][]>, triFace: (string|null)[],
+ *            triColor: Int32Array, colors: string[], groups: {start,count,materialIndex}[]|null,
+ *            triangleCount: number, bounds: object, edgePairs: number[][], edgeIndices: number[]}}
  */
 export function buildMesh(doc) {
   const verts = doc.vertices;
@@ -32,6 +40,21 @@ export function buildMesh(doc) {
   const indices = [];
   const faceTriangles = new Map();
   const triFace = []; // triangle position in `indices` -> owning face id
+  const triColor = []; // triangle position -> index into `colors`
+
+  // Palette of distinct face colours. Entry 0 is always the default shade, so
+  // an uncoloured document resolves to exactly one material and one draw call.
+  const colors = [DEFAULT_FACE_COLOR];
+  const colorIndex = new Map([[DEFAULT_FACE_COLOR, 0]]);
+  const indexOfColor = (hex) => {
+    let i = colorIndex.get(hex);
+    if (i === undefined) {
+      i = colors.length;
+      colors.push(hex);
+      colorIndex.set(hex, i);
+    }
+    return i;
+  };
 
   for (const f of doc.faces) {
     const ring = f.loop.filter((id) => vertexIndex.has(id));
@@ -47,9 +70,11 @@ export function buildMesh(doc) {
     ]);
     if (!tris.length) continue;
     faceTriangles.set(f.id, tris);
+    const cidx = indexOfColor(f.color || DEFAULT_FACE_COLOR);
     for (const t of tris) {
       indices.push(t[0], t[1], t[2]);
       triFace.push(f.id);
+      triColor.push(cidx);
     }
   }
 
@@ -61,11 +86,40 @@ export function buildMesh(doc) {
     vertexIndex,
     faceTriangles,
     triFace,
+    triColor: Int32Array.from(triColor),
+    colors,
+    groups: buildColorGroups(triColor, colors.length),
     edgePairs,
     edgeIndices: edgePairs.flat(),
     triangleCount: indices.length / 3,
     bounds: boundsOf(verts),
   };
+}
+
+/**
+ * Cut the triangle list into maximal runs of equal colour, as three.js
+ * geometry groups (`start`/`count` measured in INDEX units, i.e. 3 per
+ * triangle).
+ *
+ * Runs rather than a sort: keeping the triangle order stable means a picked
+ * `faceIndex` still lines up with `triFace` exactly as it did before colour
+ * existed, and the same colour appearing twice simply costs two groups sharing
+ * one material - which three.js handles fine.
+ *
+ * @returns {null} when there is nothing to split (a single colour), so the
+ *   renderer can use one material and skip the group bookkeeping entirely.
+ */
+export function buildColorGroups(triColor, colorCount) {
+  if (!triColor.length || colorCount < 2) return null;
+  const groups = [];
+  let start = 0;
+  for (let t = 1; t <= triColor.length; t++) {
+    if (t === triColor.length || triColor[t] !== triColor[start]) {
+      groups.push({ start: start * 3, count: (t - start) * 3, materialIndex: triColor[start] });
+      start = t;
+    }
+  }
+  return groups;
 }
 
 /**

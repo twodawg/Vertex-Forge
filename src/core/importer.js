@@ -16,7 +16,7 @@
  * Pure core code: no three.js, no DOM, unit-testable.
  */
 
-import { createDocument, addVertex, addEdge, addFace } from './model.js';
+import { createDocument, addVertex, addEdge, addFace, vertexMap } from './model.js';
 import { boundsOf, round } from './geometry.js';
 import { weldPositions, mergeCoplanarTriangles, defaultWeldTolerance } from './merge.js';
 
@@ -62,9 +62,18 @@ export function normalisePositions(positions, opts = {}) {
   const b = boundsOf(asVerts);
 
   if (opts.fit && b.radius > 0) {
+    // "fit N" means the bounding RADIUS lands on N and the model is centred:
+    // a 10-long bar with fit:2 becomes [-2, 2], not [0, 2]. Half-extent is the
+    // intuitive quantity when the result is centred on the origin anyway.
     const target = Number(opts.fit);
-    const k = target / (2 * b.radius);
+    const k = target / b.radius;
     for (let i = 0; i < out.length; i++) out[i] *= k;
+    const fb = boundsOf(toVertexObjects(out));
+    for (let i = 0; i < out.length; i += 3) {
+      out[i] -= fb.center[0];
+      out[i + 1] -= fb.center[1];
+      out[i + 2] -= fb.center[2];
+    }
     note = `Scaled to fit ${round(target, 3)} units.`;
     return { positions: out, note };
   }
@@ -124,9 +133,49 @@ export function buildDocument(parsed, opts = {}) {
         ? Math.abs(opts.weld)
         : defaultWeldTolerance(radius);
 
-  const { positions, remap, merged } = weldPositions(norm, eps);
+  const { positions, remap, merged } = weldPositions(norm, eps, parsed.colors);
   const map = (i) => (i >= 0 && i < remap.length ? remap[i] : -1);
   const vcount = positions.length / 3;
+
+  // Per-welded-vertex colour. weldPositions keeps the FIRST occurrence of a
+  // duplicated corner, so walking the input in order and writing each output
+  // slot once reproduces exactly that choice - the colour stays attached to the
+  // same corner the geometry does.
+  const src = parsed.colors;
+  let wcolor = null;
+  if (src && src.length >= 3) {
+    wcolor = new Float32Array(vcount * 3);
+    const filled = new Uint8Array(vcount);
+    for (let i = 0; i < remap.length; i++) {
+      const o = remap[i];
+      if (o < 0 || o >= vcount || filled[o]) continue;
+      filled[o] = 1;
+      wcolor[o * 3] = src[i * 3] ?? 0;
+      wcolor[o * 3 + 1] = src[i * 3 + 1] ?? 0;
+      wcolor[o * 3 + 2] = src[i * 3 + 2] ?? 0;
+    }
+    // Unfilled slots (non-finite inputs dropped by welding) default to mid-grey.
+    for (let i = 0; i < vcount; i++) {
+      if (!filled[i]) wcolor[i * 3] = wcolor[i * 3 + 1] = wcolor[i * 3 + 2] = 0.5;
+    }
+  }
+
+  /** Average a ring's vertex colours into one face hex, or null if uncoloured. */
+  const ringColor = (ring) => {
+    if (!wcolor || !ring.length) return null;
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (const i of ring) {
+      r += wcolor[i * 3];
+      g += wcolor[i * 3 + 1];
+      b += wcolor[i * 3 + 2];
+    }
+    const n = ring.length;
+    const q = (v) => Math.max(0, Math.min(255, Math.round((v / n) * 255)));
+    const h = (v) => v.toString(16).padStart(2, '0');
+    return `#${h(q(r))}${h(q(g))}${h(q(b))}`;
+  };
 
   const reindexRing = (ring) => {
     const out = [];
@@ -172,7 +221,10 @@ export function buildDocument(parsed, opts = {}) {
   }
 
   // --- emit the document -------------------------------------------------
-  const doc = opts.mode === 'merge' && opts.doc ? opts.doc : createDocument(opts.name || parsed.name || 'Imported');
+  // Honour a caller-supplied doc in BOTH modes: 'replace' overwrites its
+  // contents in place (callers hold the identity for undo/history), 'merge'
+  // appends to it. Without a doc, replace mode creates a fresh one.
+  const doc = opts.doc && (opts.mode === 'merge' || opts.mode === 'replace') ? opts.doc : createDocument(opts.name || parsed.name || 'Imported');
   if (opts.mode !== 'merge' && doc.vertices.length) {
     // Guard against a caller passing a pre-populated doc in replace mode.
     doc.vertices = [];
@@ -190,9 +242,14 @@ export function buildDocument(parsed, opts = {}) {
     }).id;
   }
 
+  // One id->vertex map for the whole batch: building it per addFace() is
+  // O(vertices) each and turned a 17k-vertex import into ~50 seconds.
+  const vmap = vertexMap(doc);
+
   let faces = 0;
   for (const ring of rings) {
-    if (addFace(doc, ring.map((i) => ids[i]))) faces++;
+    const f = addFace(doc, ring.map((i) => ids[i]), ringColor(ring), vmap);
+    if (f) faces++;
   }
 
   const boundary = new Set();

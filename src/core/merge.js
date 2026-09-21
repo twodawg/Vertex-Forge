@@ -18,7 +18,10 @@ import { newellNormal, triangulate, dot, sub, cross, length } from './geometry.j
 /** Grid bucket size for the weld pass: invisible, but wide enough to absorb the
  *  float noise real exporters leave behind. */
 export function defaultWeldTolerance(radius) {
-  const r = Number.isFinite(radius) && radius > 0 ? radius : 1;
+  // radius 0 (a degenerate/empty bound) must land on the floor, not on the
+  // tolerance for a unit box: a zero-size mesh welded at 1e-5 is invisible
+  // corruption, welded at 1e-9 is just identity.
+  const r = Number.isFinite(radius) && radius > 0 ? radius : 0;
   return Math.max(1e-9, r * 1e-5);
 }
 
@@ -31,18 +34,29 @@ export function defaultWeldTolerance(radius) {
  *
  * @param {number[]|Float32Array} positions flat [x,y,z, x,y,z, ...]
  * @param {number} eps
+ * @param {number[]|Float32Array} [colors] flat rgb 0..1 parallel to positions.
+ *   When given, two coincident corners only weld if their colours match: a
+ *   shared corner used by two materials (glTF primitives referencing one
+ *   POSITION accessor, OBJ vertices reused across usemtl blocks) cannot carry
+ *   both colours once merged, and the first one silently wins for every face.
  * @returns {{positions:number[], remap:Int32Array, merged:number}}
  *   `remap[i]` is the output index of input vertex i.
  */
-export function weldPositions(positions, eps = defaultWeldTolerance(1)) {
+export function weldPositions(positions, eps = defaultWeldTolerance(1), colors = null) {
   const total = Math.floor(positions.length / 3);
   const remap = new Int32Array(total);
   const out = [];
   if (!total) return { positions: out, remap, merged: 0 };
 
+  const useColor = !!colors && colors.length >= total * 3;
+  // 8-bit colour buckets: far coarser than any real gradient, fine enough to
+  // keep two visibly different materials apart.
+  const ckey = (i) => (useColor ? `${Math.round(colors[i * 3] * 255)},${Math.round(colors[i * 3 + 1] * 255)},${Math.round(colors[i * 3 + 2] * 255)}` : '');
+
   const near = eps > 0 ? eps : 0;
   const inv = near > 0 ? 1 / near : 0;
   const buckets = new Map();
+  const candKey = new Map(); // output vertex index -> its colour key
 
   for (let i = 0; i < total; i++) {
     const x = positions[i * 3];
@@ -58,6 +72,7 @@ export function weldPositions(positions, eps = defaultWeldTolerance(1)) {
 
     let found = -1;
     if (near > 0) {
+      const myKey = ckey(i);
       const gx = Math.round(x * inv);
       const gy = Math.round(y * inv);
       const gz = Math.round(z * inv);
@@ -70,7 +85,8 @@ export function weldPositions(positions, eps = defaultWeldTolerance(1)) {
               if (
                 Math.abs(out[cand * 3] - x) <= near &&
                 Math.abs(out[cand * 3 + 1] - y) <= near &&
-                Math.abs(out[cand * 3 + 2] - z) <= near
+                Math.abs(out[cand * 3 + 2] - z) <= near &&
+                (!useColor || candKey.get(cand) === myKey)
               ) {
                 found = cand;
                 break search;
@@ -84,6 +100,7 @@ export function weldPositions(positions, eps = defaultWeldTolerance(1)) {
     if (found < 0) {
       found = out.length / 3;
       out.push(x, y, z);
+      if (useColor) candKey.set(found, ckey(i));
       const key = `${Math.round(x * inv)}|${Math.round(y * inv)}|${Math.round(z * inv)}`;
       let bucket = buckets.get(key);
       if (!bucket) buckets.set(key, (bucket = []));

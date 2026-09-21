@@ -174,10 +174,12 @@ test('OBJ: negative and v/vt/vn indices resolve', () => {
 });
 
 test('OBJ: a corner with two normals stays two vertices', () => {
+  // v2 is shared (same normal in both faces); v1 and v3 each carry two
+  // normals, so 6 face-corners become 5 positions.
   const r = parseOBJ(
-    'v 0 0 0\nv 1 0 0\nv 1 1 0\nvn 0 0 1\nvn 0 0 -1\nf 1//1 2//1 3//1\nf 1//2 3//2 2//2\n',
+    'v 0 0 0\nv 1 0 0\nv 1 1 0\nvn 0 0 1\nvn 0 0 -1\nf 1//1 2//1 3//1\nf 1//2 3//2 2//1\n',
   );
-  assert.equal(r.positions.length / 3, 5); // v1 duplicated, v2/v3 shared
+  assert.equal(r.positions.length / 3, 5); // v1/v3 duplicated, v2 shared
 });
 
 test('OBJ: lines import as edges', () => {
@@ -343,9 +345,11 @@ test('GLB: node translation is baked into positions', () => {
 test('GLB: bad magic, bad version, truncation', () => {
   assert.throws(() => parseGLBContainer(ascii('not a glb file at all....').buffer), /magic/);
   const bytes = squareGLB();
+  // Truncation first, on a pristine copy: subarray().buffer would hand back
+  // the WHOLE parent buffer (views share it) and silently skip the check.
+  assert.throws(() => parseGLBContainer(bytes.slice(0, 30).buffer), /too small/);
   new DataView(bytes.buffer).setUint32(4, 1, true);
   assert.throws(() => parseGLBContainer(bytes.buffer), /GLB version 1/);
-  assert.throws(() => parseGLBContainer(bytes.subarray(0, 30).buffer), /too small/);
 });
 
 test('gltf with an external buffer explains what to do', () => {
@@ -444,17 +448,21 @@ test('mergeCoplanarTriangles: perpendicular faces stay separate triangles', () =
   assert.equal(r.triangles.length, 6);
 });
 
-test('mergeCoplanarTriangles: two touching quads give two groups', () => {
-  const pos = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0, 0, 2, 1, 0];
-  const r = mergeCoplanarTriangles(pos, [0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2]);
+test('mergeCoplanarTriangles: two separate quads give two groups', () => {
+  // Truly DISJOINT quads: two touching quads are one coplanar island and
+  // merge into a single hexagon - which is the point of the island algorithm.
+  const pos = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 3, 0, 0, 4, 0, 0, 4, 1, 0, 3, 1, 0];
+  const r = mergeCoplanarTriangles(pos, [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
   assert.equal(r.groups, 2);
   assert.equal(r.polygons.length, 2);
 });
 
 test('mergeCoplanarTriangles leaves a holed plate as triangles', () => {
-  // A square ring of 8 triangles around a missing centre: boundary is two loops.
-  const pos = [0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 2, 1, 0, 0, 2, 0, 1, 2, 0, 2, 2, 0];
-  const tris = [0, 1, 3, 1, 4, 3, 3, 4, 7, 3, 7, 6, 1, 2, 4, 4, 2, 5, 5, 2, 7, 7, 2, 6];
+  // Square annulus: 3x3 outer, unit hole at the centre, 8 CCW triangles.
+  // Its boundary is TWO loops, so no single ring exists and the island must
+  // be left as plain triangles.
+  const pos = [0, 0, 0, 3, 0, 0, 3, 3, 0, 0, 3, 0, 1, 1, 0, 2, 1, 0, 2, 2, 0, 1, 2, 0];
+  const tris = [0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7];
   const r = mergeCoplanarTriangles(pos, tris);
   assert.equal(r.groups, 0);
   assert.equal(r.triangles.length, tris.length);
@@ -495,7 +503,7 @@ test('buildDocument: an STL square welds to 4 verts and merges to one quad', () 
   assert.equal(doc.faces.length, 1);
   assert.equal(doc.faces[0].loop.length, 4);
   assert.equal(doc.name, 'Square');
-  assert.deepEqual(validate(doc), []);
+  assert.deepEqual(validate(doc).errors, [], JSON.stringify(validate(doc)));
 });
 
 test('buildDocument: mergePolys off keeps triangle faces', () => {
@@ -542,7 +550,7 @@ test('buildDocument: merge mode appends into the live document', () => {
   const { doc: out } = buildDocument(parsed, { mode: 'merge', doc });
   assert.equal(out, doc);
   assert.equal(doc.vertices.length, before + 4);
-  assert.deepEqual(validate(doc), []);
+  assert.deepEqual(validate(doc).errors, [], JSON.stringify(validate(doc)));
 });
 
 test('buildDocument: replace mode refuses to blend with a dirty doc', () => {
@@ -567,7 +575,7 @@ test('buildDocument: duplicate vertices collapse into a valid face ring', () => 
   };
   const { doc } = buildDocument(flat, { weld: true });
   assert.equal(doc.faces[0].loop.length, 3);
-  assert.deepEqual(validate(doc), []);
+  assert.deepEqual(validate(doc).errors, [], JSON.stringify(validate(doc)));
 });
 
 /* ------------------------------------------------------------------ *

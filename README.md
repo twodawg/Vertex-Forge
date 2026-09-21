@@ -1,9 +1,9 @@
 # Vertex Forge
 
 A static, in-browser **3D vertex editor**. You place individual vertices, join them
-into edges and n-gon faces, and export as native JSON or binary glTF (`.glb`).
-You can also **import** existing 3D files (OBJ, STL, PLY, GLB, glTF) and edit
-their geometry directly.
+into edges and n-gon faces, paint those faces, and export as native JSON or binary
+glTF (`.glb`). You can also **import** existing 3D files (OBJ, STL, PLY, GLB,
+glTF) and edit their geometry and colour directly.
 
 No build step. No bundler. No npm dependencies. The browser loads ES modules
 straight from disk.
@@ -79,19 +79,27 @@ A **document** is three arrays plus metadata:
 | ---------- | ------------------------------- | ------------------------------------------------- |
 | `vertices` | `{ id, x, y, z }`               | The atoms. Everything else references them by id.  |
 | `edges`    | `{ id, a, b }`                  | Loose wire. Face boundaries are drawn regardless.  |
-| `faces`    | `{ id, loop: [vertexId, ...] }` | Ordered ring, **3 or more** vertices.              |
+| `faces`    | `{ id, loop: [vertexId, ...], color? }` | Ordered ring, **3 or more** vertices. `color` is a display-space `#rrggbb`, present only when painted. |
 
 Positions are plain numbers in a unit-less space; documents carry `units: "unit"`
 for round-trip honesty. Faces may be non-planar — the Newell method derives the
 normal, so a warped n-gon still shades.
 
-**Tools** (`V` `B` `E` `F` `M`): select, place vertex, join edge, close face, move.
+**Tools** (`V` `B` `E` `F` `M` `P`): select, place vertex, join edge, close face, move, paint.
 Vertex and edge placement work as *chains*: click a run of points, then `Enter` to
 commit or `Esc` to abandon. `F` on a selected closed boundary fills it.
 
 **Ops** on the selection: extrude faces, weld by distance, snap to grid, centre on
 origin, delete, flip winding, and unify winding (re-orient every face outward by
 flood-filling across shared edges).
+
+**Colour** is per-face, never per-vertex: a brush hex from the palette (or a custom
+colour picker), applied with the Paint tool (`P`) — click a face to fill it,
+shift-click to build a run, or select faces and press **Paint selected**.
+**Clear** returns faces to the default shade. Colour lives on the face's `color`
+field, survives undo/redo, extrusion (the new walls inherit the cap's colour), and
+round-trips through both JSON and GLB. Uncoloured faces omit the key entirely, so a
+colourless document serialises byte-identically to earlier versions.
 
 **Undo** is snapshot-based: mutate the document in place, call `hist.begin()`
 first and `hist.commit(label)` after. `commit()` compares serialisations, so a
@@ -113,25 +121,27 @@ Anything else opens an options dialog.
 
 | Format | What is handled |
 | ------ | --------------- |
-| **OBJ** | `v` / `vt` / `vn` / `f` / `l` / `o`. True n-gons preserved. Negative indices, `v/vt/vn` and `v//vn` specifiers, and homogeneous `w` are honoured. Vertices that no face or line references are dropped, so a file with 50k `v` lines whose geometry uses 300 of them imports 300 handles. |
-| **STL** | ASCII and binary, auto-detected from content. |
-| **PLY** | ASCII plus binary in either endianness. `list` properties and extra columns (colour, normals, texture coords) are stepped over. Vertices no face references stay in the document as loose points — which is what a raw scan should import as. |
-| **GLB** | Version-2 container, JSON + BIN chunks with 4-byte alignment, accessors, buffer views, node transforms (translation, rotation, scale, matrix), and draw modes including `LINES` / `LINE_LOOP` / `LINE_STRIP` / `TRIANGLES` / `TRIANGLE_STRIP` / `TRIANGLE_FAN`. |
+| **OBJ** | `v` / `vt` / `vn` / `f` / `l` / `o`. True n-gons preserved. Negative indices, `v/vt/vn` and `v//vn` specifiers, and homogeneous `w` are honoured. Vertices that no face or line references are dropped, so a file with 50k `v` lines whose geometry uses 300 of them imports 300 handles. **Vertex colour** (`v x y z r g b`, 0-1 or 0-255) is read. A `.mtl` sidecar (`usemtl` + `Kd`) is honoured when the parser is given its text. |
+| **STL** | ASCII and binary, auto-detected from content. No colour exists in STL. |
+| **PLY** | ASCII plus binary in either endianness. `list` properties and extra columns (normals, texture coords) are stepped over. **Vertex colour** (`red`/`green`/`blue` or `diffuse_*`) is read, scaled by the *declared property type* — `uchar` channels are 0-255, `ushort` 0-65535, `float`/`double` 0-1 — never guessed from the values, so a genuinely dark scan stays dark. Vertices no face references stay in the document as loose points — which is what a raw scan should import as. |
+| **GLB** | Version-2 container, JSON + BIN chunks with 4-byte alignment, accessors, buffer views, node transforms (translation, rotation, scale, matrix), and draw modes including `LINES` / `LINE_LOOP` / `LINE_STRIP` / `TRIANGLES` / `TRIANGLE_STRIP` / `TRIANGLE_FAN`. **Colour** from `COLOR_0` (per-vertex), material `baseColorFactor`, or an embedded PNG `baseColorTexture` sampled through the mesh's UVs. |
 | **glTF** | Same reader, plus `data:` URI buffers. |
 
 Every reader returns one neutral shape —
-`{ name, kind, note, positions, polygons, triangles, lines }` — so nothing
-downstream has to care where the geometry came from.
+`{ name, kind, note, positions, colors?, uvs?, textureJobs?, polygons, triangles, lines }` —
+so nothing downstream has to care where the geometry came from. `colors` is flat
+`rgb` in 0-1, **strictly parallel to `positions`**; `buildDocument` averages a
+face's vertex colours into its single `#rrggbb`.
 
-### Geometry only, on purpose
+### Colour spaces, because it is a real trap
 
-Materials, textures, normals, UVs, skinning, animation and morph targets are
-**discarded**. Vertex Forge edits vertices and has nowhere sane to put the rest.
-When this happens, the import toast says so (e.g. *"UVs and normals were
-dropped."*).
-
-A `.gltf` that needs an external `.bin` cannot load in a browser page on its own,
-so the error explains why and tells you to convert to a single-file `.glb`.
+glTF defines colour as **linear-light**; the document's hex is display-space
+**sRGB**. Copying linear values straight into a hex makes a bright imported model
+come in dark and muddy (linear 0.5 grey reads as `#808080` instead of `#bcbcbc`),
+so `formats.js` runs glTF colour — `COLOR_0` *and* `baseColorFactor` — through the
+sRGB transfer function on the way in. OBJ and PLY channel values are treated as
+already display-space, matching what their writers actually emit. Export inverts
+the conversion via `THREE.Color`, which is linear-managed internally.
 
 ### The repair pipeline
 
@@ -194,7 +204,10 @@ left as triangles. Wrong topology would be worse than a busy mesh.
 
 ### Limitations
 
-- **No materials, textures, or vertex colours** in or out.
+- **No materials or shaders in or out.** Face colour is per-face (`#rrggbb`), not
+  per-vertex: an import averages a face's vertex colours into one hex, and GLB
+  export writes one material per distinct colour. Metallic/roughness, normal maps
+  and emissive are dropped. JPEG textures are not decoded (PNG only).
 - **No hierarchy.** Nodes are flattened and transforms baked into positions.
 - **Sparse glTF accessors are unsupported** and fail loudly rather than importing
   wrong data.
@@ -387,9 +400,13 @@ catch a broken link: the test files import modules individually and never import
 - `tests/import.test.js` — every format reader against byte-accurate fixtures
   (including a hand-assembled GLB and a GLB round trip), welding and merging edge
   cases, `buildDocument` option matrices, and `importFile` end to end.
+- `tests/color.test.js` — the whole colour pipeline: `normalizeColor`, palette →
+  contiguous mesh groups, JSON/GLB persistence, paint → export → re-import
+  round-trips, and import colour fidelity for OBJ / PLY / glTF (linear → sRGB).
 
-Current status: **93 of 107 pass.** All 49 pre-existing tests pass; the 14
-failures are confined to `import.test.js` — see [Known issues](#known-issues).
+Current status: **131 of 131 pass.** The suites are self-contained — the head
+fixtures under `test-assets/` (regeneratable via `node tools/make-head-assets.mjs
+test-assets`) are for the `tools/check-*` fidelity audits, not for `npm test`.
 
 ---
 
@@ -426,18 +443,24 @@ the dialog painted over the viewport on load.
 
 ## Known issues
 
-**14 failing assertions in `tests/import.test.js`.** Investigation so far shows
-most are wrong *expectations* in the new test file rather than product bugs — for
-example asserting `deepEqual(validate(doc), [])` when `validate()` returns an
-object, assuming replace-mode mutates the caller's document when it correctly
-returns a new one, and error-message regexes narrower than the real wording.
-**Not yet triaged to completion:** the OBJ "a corner with two normals stays two
-vertices" case reports 6 vertices where 5 were expected, which may be a genuine
-reader bug.
+**Draco-compressed glTF fails with a confusing error.** A file using
+`KHR_draco_mesh_compression` (e.g. three.js's `duck.glb`) legitimately has
+accessors with no `bufferView`, so the reader dies with *"glTF accessor has no
+readable bufferView"* instead of saying "this model is Draco-compressed and we
+cannot decode it." There is no decoder here; the fix is to detect the extension
+and fail with the right message. Found by testing against real third-party
+assets — our own fixtures do not cover it.
 
-**No browser smoke test.** The import flow has not been exercised by clicking
-through the real UI; coverage is Node-side only. Headless-browser verification of
-STL and OBJ import is outstanding.
+**Textured imports are approximate.** A `baseColorTexture` is baked to per-vertex
+colour by nearest-texel UV sampling, so a 4k face texture on a coarse mesh
+visually quantises (measured on the procedural head: eye region Δ1, skin Δ~39 at
+128px). Native `.vforge.json` is the lossless format; GLB is exact only where
+colour is flat per material.
+
+**No committed browser smoke test.** Import/paint flows have been verified by
+headless-Chromium probes (SwiftShader WebGL, real file inputs and downloads), but
+those scripts live in `scratch/` and are gitignored, so CI-equivalent coverage is
+Node-only. Promoting at least one browser probe into `tools/` would be worth it.
 
 **`IMPORT_ACCEPT`** in `src/ui/io.js` is exported but never used — `index.html`
 hard-codes the `<input accept="…">` list. They agree today, but only by
@@ -450,10 +473,6 @@ focus is not restored to the previously-focused element when the dialog closes.
 **Unused imports.** `node tools/check-imports.mjs` lists several in `core/ops.js`,
 `ui/app.js` and `ui/io.js` (e.g. `addEdge`, `findEdge`, `removeEdge`,
 `removeFace`). Harmless, but they should go.
-
-**Scratch files are committed.** `scratch/probe.mjs` and `scratch/note.txt` are
-debugging leftovers from the import work, not part of the app. Delete them, and
-add a `.gitignore` (there is none yet).
 
 **`stats` round-trip is lossy by design** — see
 [Native file format](#native-file-format). Do not trust it as source data.

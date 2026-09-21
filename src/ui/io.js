@@ -6,6 +6,7 @@
 import { serialize, deserialize } from '../core/model.js';
 import { buildMesh } from '../core/mesh.js';
 import { parseAny, extOf, ImportError } from '../core/formats.js';
+import { applyTextures } from '../core/texture.js';
 import { buildDocument } from '../core/importer.js';
 
 export function download(blob, filename) {
@@ -75,7 +76,27 @@ export async function importFile(file, opts = {}) {
   const ext = extOf(file.name);
 
   if (ext === 'json') {
-    const doc = await readJSONFile(file);
+    // Read raw text first: a .json is not necessarily a VertexForge document.
+    // glTF JSON (.gltf renamed to .json) would otherwise deserialize into an
+    // empty "native" doc instead of getting a real error or parse.
+    const text = await file.text();
+    let raw = null;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      /* let readJSONFile raise the friendly parse error below */
+    }
+    if (raw && !looksLikeNativeJSON(raw)) {
+      // Looks like a foreign model format: route it through the sniffing path
+      // by handing the buffer to parseAny with its true (json) name.
+      const built = buildDocument(parseAny(file.name, await file.arrayBuffer()), {
+        ...opts,
+        name: opts.name || stemOf(file.name),
+      });
+      if (!built.stats.vertices) throw new ImportError('That file imported no vertices.');
+      return built;
+    }
+    const doc = raw === null ? await readJSONFile(file) : deserialize(raw).doc;
     return {
       doc,
       stats: {
@@ -105,7 +126,10 @@ export async function importFile(file, opts = {}) {
     }
   }
 
-  const parsed = parseAny(file.name, buffer);
+  const parsed = parseAny(file.name, buffer, { mtlText: opts.mtlText });
+  // glTF baseColorTexture is resolved here because PNG inflate is async and
+  // the core parsers are sync by design.
+  await applyTextures(parsed);
   const built = buildDocument(parsed, { ...opts, name: opts.name || stemOf(file.name) });
 
   // Fail loudly rather than showing an empty viewport.
@@ -143,9 +167,11 @@ export async function exportGLB(viewport, doc) {
       truncateDrawRange: true,
     });
   } finally {
-    // The export mesh is throwaway: release its GPU-side resources.
+    // The export mesh is throwaway: release its GPU-side resources. Materials
+    // are per-colour now, so dispose whichever shape we were handed.
     object.geometry.dispose();
-    object.material.dispose();
+    if (Array.isArray(object.material)) object.material.forEach((m) => m.dispose());
+    else object.material.dispose();
   }
   if (result instanceof Blob) return result;
   if (result instanceof ArrayBuffer) {
