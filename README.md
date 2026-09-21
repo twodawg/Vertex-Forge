@@ -143,6 +143,36 @@ sRGB transfer function on the way in. OBJ and PLY channel values are treated as
 already display-space, matching what their writers actually emit. Export inverts
 the conversion via `THREE.Color`, which is linear-managed internally.
 
+### What is still discarded
+
+Normals (recomputed from winding), skinning, animation and morph targets are
+dropped — Vertex Forge edits vertices and has nowhere sane to put them. The import
+toast says so when it happens. UVs and `baseColorTexture` are the one exception:
+they exist only long enough to bake texture colour into per-vertex colours.
+
+PNG decoding needs async inflate, while the core parsers are sync by design, so
+`parseGLTF` records `textureJobs` and `applyTextures()` (in
+[`src/core/texture.js`](src/core/texture.js), called by `importFile`) finishes the
+work. The decoder itself is [`src/core/png.js`](src/core/png.js): dependency-free,
+8/16-bit RGB/RGBA/greyscale/palette, all five row filters, inflating via
+`DecompressionStream` in the browser and `node:zlib` in tests. **JPEG textures are
+not supported** — the import falls back to the flat material colour and notes it.
+
+A `.gltf` that needs an external `.bin` cannot load in a browser page on its own,
+so the error explains why and tells you to convert to a single-file `.glb`.
+
+### Colour and welding: why corners split at material boundaries
+
+`weldPositions` refuses to merge two coincident corners carrying **different**
+colours. A vertex shared by a red face and a blue face cannot exist as one vertex
+in a vertex-colour model — whichever colour won the weld would be wrong for the
+other face. This is exactly what three's `GLTFExporter` emits for a painted model
+(one shared `POSITION` accessor, absolute indices, colour in the materials), so
+without the split, re-importing your own GLB recolours the entire mesh in the
+first material's shade. The cost is honest: a two-tone cube comes back with more
+vertices than it left with, split where the colours meet. Same trade every DCC
+makes.
+
 ### The repair pipeline
 
 ```
@@ -286,6 +316,7 @@ Keys are ignored while focus is in an input, select, or textarea.
 | `E` | Draw edge chain |
 | `F` | Close face / fill selection |
 | `M` | Move |
+| `P` | Paint — fill the face under the cursor with the brush colour; shift-click adds faces to the selection first |
 | `Enter` | Commit the current chain |
 | `Esc` | Cancel chain and clear selection |
 | `Del` / `Backspace` | Delete selection |
@@ -319,6 +350,12 @@ Arrow nudge uses the snap step when snapping is on, otherwise 0.1 (0.01 with
 
 Import · Export JSON · Export GLB · Cube · Plane · Tetra · Clear · Center · Frame ·
 Weld · Fill · Extrude · Delete · Flip · Unify · Snap · Undo · Redo · Screenshot.
+
+**Colour panel:** a `brush` colour picker (with hex readout), a 15-swatch preset
+palette, and two ops — **Paint selected** (fill every selected face) and **Clear**
+(return them to the default shade `#c9d2e3`). The Paint tool's status hint:
+*"Click a face to fill it with the brush colour · shift-click to build a multi-face
+selection"*.
 
 **Debugging handle:** `window.__vf = { state, viewport }` is exposed in the
 console.
